@@ -117,6 +117,7 @@ Thank you!
 
 docker_client = docker.from_env()
 current_doc = reactive.value('none')
+current_error = reactive.value(None) # probably not right way to do this
 
 def render_quarto(qmdfilename: str):
     qmddir = os.path.dirname(qmdfilename)
@@ -137,15 +138,23 @@ def render_quarto(qmdfilename: str):
     if not docker_image:
         print('QUARTO_DS_CHATBOT_DOCKER_IMAGE not set, not running Quarto')
         return
-    logs = docker_client.containers.run(
-        docker_image,
-        command,
-        volumes = {
-            qmddir: {
-                'bind': '/home/quarto',
-                'mode': 'rw'
-            }
-        })
+    try:
+        logs = docker_client.containers.run(
+            docker_image,
+            command,
+            volumes = {
+                qmddir: {
+                    'bind': '/home/quarto',
+                    'mode': 'rw'
+                }
+            })
+        current_error.set(None)
+    except Exception as xep:
+        htmlfilename = re.sub(r'\.qmd$', '.html', qmdfilename)
+        with open(htmlfilename, "w") as html_file:
+            html_file.write('<html><head><title>Quarto render failed</title></head><body><pre>' + str(xep).replace('\\n', '\n') + '</pre></body></html>')
+        current_error.set(str(xep))
+
     current_doc.set(re.sub('^' + outdir + '/', '', re.sub(r'\.qmd$', '', qmdfilename)))
 
 def show_answer(filename: str, answer: str) -> bool:
@@ -226,10 +235,31 @@ def server(input):
             response = chat_model.stream(chat.user_input(), echo = debug and "all")
             # object bool can't be used in 'await' expression'"
             # response = await chat_model.stream_async(chat.user_input(), echo = debug and "all")
+            print('on_user_submit streaming')
             await chat.append_message_stream(response)
         else:
             response = chat_model.chat(chat.user_input(), echo = debug and "all")
             await chat.append_message(response.content)
+
+    @reactive.effect
+    async def submit_error():
+        if not current_error():
+            return
+        err = 'I saw the error\n\n```\n' + current_error() + '\n```\n'
+
+        print('submit_error')
+
+        # add message to chat as if user wrote it
+        await chat.append_message({"role": "user", "content": err})
+        if streaming:
+            response = chat_model.stream(err, echo = debug and "all")
+            await chat.append_message_stream(response)
+        else:
+            response = chat_model.chat(err, echo = debug and "all")
+            await chat.append_message(response.content)
+
+        # works but you need to press enter
+        # chat.update_user_input(value = err)
 
     @render.ui
     def rendered():
